@@ -1,6 +1,6 @@
-"""Market Opportunity Dashboard v2.0
+"""Market Opportunity Dashboard v3.0
 
-Evidence-based research dashboard for US stocks, Saudi stocks, gold and silver.
+Research-backed opportunity engine for US stocks, Saudi stocks, gold and silver.
 The recommendation engine is deterministic. AI, when enabled, only adds context.
 
 Core ideas used:
@@ -10,7 +10,7 @@ Core ideas used:
   momentum confirmation and risk.
 - Metals: trend/momentum plus USD/yield macro confirmation.
 
-Data provider: yfinance (prototype/free provider; Saudi coverage can be incomplete).
+Data provider: yfinance (free provider; Saudi coverage can be incomplete/delayed). V3 explicitly penalizes missing data rather than treating it as neutral evidence.
 """
 
 from __future__ import annotations
@@ -64,7 +64,14 @@ SAUDI_UNIVERSE = {
     "2380.SR":"Petro Rabigh", "2350.SR":"Saudi Kayan", "2050.SR":"Savola",
     "2290.SR":"Yansab", "2330.SR":"Advanced Petrochemical", "3040.SR":"Qassim Cement",
     "3020.SR":"Yamama Cement", "5110.SR":"Saudi Electricity", "4030.SR":"Bahri",
-    "4260.SR":"Budget Saudi", "4071.SR":"Arabian Contracting", "4002.SR":"Mouwasat",
+    "4260.SR":"Budget Saudi", "4261.SR":"Theeb Rent a Car", "4071.SR":"Arabian Contracting", "4002.SR":"Mouwasat",
+    "4031.SR":"Saudi Ground Services", "4040.SR":"SAPTCO", "4050.SR":"SASCO",
+    "4080.SR":"Aseer", "4090.SR":"Taiba Investments", "4100.SR":"Makkah Construction",
+    "4210.SR":"Saudi Research and Media", "4250.SR":"Jabal Omar", "4290.SR":"Alkhaleej Training",
+    "4300.SR":"Dar Al Arkan", "4321.SR":"Cenomi Centers", "4322.SR":"Retal",
+    "6001.SR":"Halwani Bros", "6002.SR":"Herfy", "6010.SR":"NADEC", "6020.SR":"Jahez",
+    "1830.SR":"Leejam Sports", "1831.SR":"Maharah", "1832.SR":"Sadr Logistics",
+    "4011.SR":"Lazurde", "4012.SR":"Thob Al Aseel", "4014.SR":"Scientific & Medical Equipment House",
 }
 
 METALS = {"GC=F":"Gold", "SI=F":"Silver"}
@@ -128,7 +135,7 @@ def ret(close: pd.Series, days: int) -> float | None:
     return (float(close.iloc[-1]) / float(close.iloc[-days-1]) - 1) * 100
 
 
-def get_hist(ticker: str, period: str = "2y") -> pd.DataFrame | None:
+def get_hist(ticker: str, period: str = "5y") -> pd.DataFrame | None:
     try:
         df = yf.Ticker(ticker).history(period=period, auto_adjust=False)
         if df is None or df.empty or len(df) < 120:
@@ -166,6 +173,14 @@ def technical_snapshot(hist: pd.DataFrame) -> dict[str, Any]:
     mom12_1 = None
     if len(close) >= 253 and finite(close.iloc[-22]) and finite(close.iloc[-253]) and close.iloc[-253] != 0:
         mom12_1 = (float(close.iloc[-22]) / float(close.iloc[-253]) - 1) * 100
+    low52 = float(close.tail(252).min())
+    high52 = float(close.tail(252).max())
+    pos52 = ((p-low52)/(high52-low52)*100) if high52>low52 else 50.0
+    low3 = float(close.tail(min(len(close),756)).min())
+    high3 = float(close.tail(min(len(close),756)).max())
+    pos3 = ((p-low3)/(high3-low3)*100) if high3>low3 else 50.0
+    peak5 = close.cummax()
+    dd5 = ((close/peak5)-1).min()*100 if len(close) else None
     latest = hist.index[-1]
     if getattr(latest, "tzinfo", None):
         latest = latest.tz_convert(None)
@@ -181,8 +196,10 @@ def technical_snapshot(hist: pd.DataFrame) -> dict[str, Any]:
         "atr_abs": atr_abs,
         "atr_pct": (atr_abs / p * 100) if atr_abs and p else None,
         "drawdown": float(dd) if finite(dd) else None,
-        "high52": float(close.tail(252).max()),
-        "low52": float(close.tail(252).min()),
+        "drawdown5y": float(dd5) if finite(dd5) else None,
+        "high52": high52, "low52": low52, "position52": pos52,
+        "position3y": pos3,
+        "ret756": ret(close, min(756,len(close)-1)) if len(close)>300 else None,
         "spark": spark(close),
         "as_of": latest.strftime("%Y-%m-%d"),
     }
@@ -200,6 +217,10 @@ def raw_fundamentals(info: dict[str, Any]) -> dict[str, Any]:
         "fcf_yield": fcf_yield,
         "revenue_growth": info.get("revenueGrowth"),
         "earnings_growth": info.get("earningsGrowth"),
+        "earnings_q_growth": info.get("earningsQuarterlyGrowth"),
+        "revenue_per_share": info.get("revenuePerShare"),
+        "gross_margin": info.get("grossMargins"),
+        "current_ratio": info.get("currentRatio"),
         "forward_pe": info.get("forwardPE"),
         "trailing_pe": info.get("trailingPE"),
         "price_book": info.get("priceToBook"),
@@ -267,6 +288,49 @@ def risk_quality(t: dict[str, Any], atr_values: list[float], drawdowns: list[flo
     return clip(0.55 * atr_s + 0.45 * dd_s)
 
 
+def reversal_score(t: dict[str, Any], f: dict[str, Any]) -> float:
+    """Detect a forming recovery without rewarding a falling knife.
+    A deep drawdown creates *potential*, but points only arrive when price and/or earnings stabilize.
+    """
+    dd = t.get("drawdown")
+    if not finite(dd) or dd > -15:
+        return 3.5
+    score = 3.0
+    if dd <= -25: score += 1.0
+    if dd <= -40: score += 0.5
+    if finite(t.get("position52")) and t["position52"] <= 35: score += 0.5
+    if finite(t.get("ret21")) and t["ret21"] > 0: score += 1.2
+    if finite(t.get("ret63")) and t["ret63"] > 0: score += 1.2
+    if finite(t.get("vol_ratio")) and t["vol_ratio"] >= 1.15 and finite(t.get("ret5")) and t["ret5"] > 0: score += 0.8
+    eg = f.get("earnings_growth") if f else None
+    rg = f.get("revenue_growth") if f else None
+    if finite(eg) and eg > 0: score += 0.8
+    elif finite(eg) and eg < -0.25: score -= 1.0
+    if finite(rg) and rg > 0: score += 0.5
+    return clip(score)
+
+
+def value_trap_penalty(t: dict[str, Any], f: dict[str, Any]) -> float:
+    """0 is clean; higher means cheap/low price may be deterioration rather than opportunity."""
+    p = 0.0
+    if finite(t.get("ret126")) and t["ret126"] < -20: p += 1.0
+    if finite(t.get("ret252")) and t["ret252"] < -30: p += 1.0
+    if finite(f.get("earnings_growth")) and f["earnings_growth"] < -0.20: p += 1.5
+    if finite(f.get("revenue_growth")) and f["revenue_growth"] < -0.08: p += 1.0
+    if finite(f.get("operating_margin")) and f["operating_margin"] < 0: p += 1.0
+    return min(4.0,p)
+
+
+def opportunity_type(a: dict[str, Any]) -> str:
+    s=a["scores"]
+    if s.get("recovery",0)>=7.0: return "Recovery"
+    if s.get("breakout",0)>=7.5: return "Breakout"
+    if s.get("pullback",0)>=7.2: return "Pullback"
+    if s.get("growth_value",0)>=7.2: return "Growth + Value"
+    if s.get("quality_value",0)>=7.2: return "Quality + Value"
+    if s.get("momentum",0)>=7.5: return "Momentum"
+    return "Balanced"
+
 def fetch_base_asset(ticker: str, name: str, market: str, asset_type: str) -> dict[str, Any] | None:
     h = get_hist(ticker)
     if h is None:
@@ -304,57 +368,44 @@ def calc_equity_scores(assets: list[dict[str, Any]], asset: dict[str, Any], benc
     mom12 = percentile(mom_vals, t.get("mom12_1"), True) if finite(t.get("mom12_1")) else 5.0
     mom6_vals = [a["tech"].get("ret126") for a in market_assets if finite(a["tech"].get("ret126"))]
     mom6 = percentile(mom6_vals, t.get("ret126"), True) if finite(t.get("ret126")) else 5.0
-    momentum = clip(0.65 * mom12 + 0.35 * mom6)
+    momentum = clip(0.65*mom12 + 0.35*mom6)
 
     if finite(t.get("ret126")) and finite(benchmark_ret126):
-        rs_raw = t["ret126"] - benchmark_ret126
-        rs_values = [a["tech"].get("ret126") - benchmark_ret126 for a in market_assets if finite(a["tech"].get("ret126"))]
-        rel_strength = percentile(rs_values, rs_raw, True)
-    else:
-        rel_strength = 5.0
+        rs_raw=t["ret126"]-benchmark_ret126
+        rs_values=[a["tech"].get("ret126")-benchmark_ret126 for a in market_assets if finite(a["tech"].get("ret126"))]
+        rel_strength=percentile(rs_values,rs_raw,True)
+    else: rel_strength=5.0
 
-    vc = volume_confirmation(t)
-    setup = setup_score(t)
-    atr_values = [a["tech"].get("atr_pct") for a in market_assets if finite(a["tech"].get("atr_pct"))]
-    dd_values = [a["tech"].get("drawdown") for a in market_assets if finite(a["tech"].get("drawdown"))]
-    risk = risk_quality(t, atr_values, dd_values)
-    trade = clip(0.30*tr + 0.25*momentum + 0.20*rel_strength + 0.10*vc + 0.10*setup + 0.05*risk)
+    vc=volume_confirmation(t); setup=setup_score(t)
+    atr_values=[a["tech"].get("atr_pct") for a in market_assets if finite(a["tech"].get("atr_pct"))]
+    dd_values=[a["tech"].get("drawdown") for a in market_assets if finite(a["tech"].get("drawdown"))]
+    risk=risk_quality(t,atr_values,dd_values)
 
-    quality_parts = [
-        factor_score(pool, asset, "roe", True),
-        factor_score(pool, asset, "operating_margin", True),
-        factor_score(pool, asset, "profit_margin", True),
-        factor_score(pool, asset, "fcf_yield", True),
-    ]
-    if f.get("sector") != "Financial Services":
-        quality_parts.append(factor_score(pool, asset, "debt_equity", False))
-    quality = clip(mean_available(quality_parts))
+    quality_parts=[factor_score(pool,asset,"roe",True),factor_score(pool,asset,"operating_margin",True),factor_score(pool,asset,"profit_margin",True),factor_score(pool,asset,"fcf_yield",True)]
+    if f.get("sector") != "Financial Services": quality_parts.append(factor_score(pool,asset,"debt_equity",False))
+    quality=clip(mean_available(quality_parts))
+    growth=clip(mean_available([factor_score(pool,asset,"revenue_growth",True),factor_score(pool,asset,"earnings_growth",True),factor_score(pool,asset,"earnings_q_growth",True)]))
+    value=clip(mean_available([factor_score(pool,asset,"forward_pe",False),factor_score(pool,asset,"price_book",False),factor_score(pool,asset,"ev_ebitda",False),factor_score(pool,asset,"dividend_yield",True)]))
 
-    growth = clip(mean_available([
-        factor_score(pool, asset, "revenue_growth", True),
-        factor_score(pool, asset, "earnings_growth", True),
-    ]))
+    recovery=reversal_score(t,f)
+    breakout=clip(0.35*tr+0.25*momentum+0.20*vc+0.20*(10 if finite(t.get("position52")) and t["position52"]>=85 else 4))
+    pullback=clip(0.35*tr+0.25*momentum+0.20*rel_strength+0.20*setup)
+    quality_value=clip(0.55*quality+0.45*value)
+    growth_value=clip(0.40*growth+0.30*quality+0.30*value)
+    trap=value_trap_penalty(t,f)
 
-    value_parts = [
-        factor_score(pool, asset, "forward_pe", False),
-        factor_score(pool, asset, "price_book", False),
-        factor_score(pool, asset, "ev_ebitda", False),
-        factor_score(pool, asset, "dividend_yield", True),
-    ]
-    value = clip(mean_available(value_parts))
-    invest = clip(0.30*quality + 0.25*growth + 0.25*value + 0.10*momentum + 0.10*risk)
+    # TRADE: multiple opportunity paths. Recovery is allowed, but cannot dominate without confirmation.
+    continuation=0.28*tr+0.24*momentum+0.18*rel_strength+0.10*vc+0.12*setup+0.08*risk
+    alternative=max(0.92*breakout,0.94*pullback,0.90*recovery)
+    trade=clip(max(continuation,alternative))
 
-    data_fields = [f.get(k) for k in ["roe","revenue_growth","earnings_growth","forward_pe","price_book"]]
-    data_quality = 10 * sum(finite(x) for x in data_fields) / len(data_fields)
+    # INVEST: established factor families + historical/price confirmation. Penalize likely value traps.
+    invest_base=0.26*quality+0.22*growth+0.22*value+0.14*momentum+0.08*risk+0.08*max(recovery,5.0)
+    invest=clip(invest_base-0.65*trap)
 
-    return {
-        "trade": round(trade,1), "invest": round(invest,1),
-        "trend": round(tr,1), "momentum": round(momentum,1), "relative_strength": round(rel_strength,1),
-        "volume": round(vc,1), "setup": round(setup,1), "risk": round(risk,1),
-        "quality": round(quality,1), "growth": round(growth,1), "value": round(value,1),
-        "data_quality": round(data_quality,1),
-    }
-
+    fields=[f.get(k) for k in ["roe","operating_margin","revenue_growth","earnings_growth","forward_pe","price_book","target_mean"]]
+    dq=10*sum(finite(x) for x in fields)/len(fields)
+    return {"trade":round(trade,1),"invest":round(invest,1),"trend":round(tr,1),"momentum":round(momentum,1),"relative_strength":round(rel_strength,1),"volume":round(vc,1),"setup":round(setup,1),"risk":round(risk,1),"quality":round(quality,1),"growth":round(growth,1),"value":round(value,1),"recovery":round(recovery,1),"breakout":round(breakout,1),"pullback":round(pullback,1),"quality_value":round(quality_value,1),"growth_value":round(growth_value,1),"value_trap":round(trap,1),"data_quality":round(dq,1)}
 
 def macro_snapshot() -> dict[str, Any]:
     out = {}
@@ -404,78 +455,78 @@ def calc_metal_scores(asset: dict[str, Any], macro: dict[str, Any]) -> dict[str,
         "trend":round(tr,1), "momentum":round(mo,1), "relative_strength":5.0,
         "volume":5.0, "setup":round(setup_score(t),1), "risk":round(risk,1),
         "quality":5.0, "growth":5.0, "value":round(macro_score,1), "data_quality":10.0,
+        "recovery":3.5, "breakout":round(0.6*tr+0.4*mo,1), "pullback":round(setup_score(t),1),
+        "quality_value":5.0, "growth_value":5.0, "value_trap":0.0,
     }
 
 
-def trade_recommendation(score: float) -> str:
-    if score >= 7.5: return "BUY"
-    if score >= 6.2: return "WAIT"
-    if score <= 4.0: return "SELL"
+def trade_levels(a: dict[str, Any]) -> dict[str, float | None]:
+    t=a["tech"]; p=t["price"]; aa=t.get("atr_abs"); s20=t.get("sma20"); s50=t.get("sma50")
+    if not finite(aa) or aa<=0: aa=max(p*0.025,0.01)
+    # Buy zone must contain current price for a direct BUY. Pullback zone may sit below current and then recommendation becomes WAIT.
+    if finite(s20) and s20 < p and (p-s20) <= 1.7*aa:
+        entry_low=max(0,s20-0.20*aa); entry_high=min(p+0.10*aa,s20+0.55*aa)
+    else:
+        entry_low=max(0,p-0.45*aa); entry_high=p+0.15*aa
+    support=[x for x in [s20,s50,p-1.35*aa] if finite(x) and x < entry_low]
+    base=max(support) if support else entry_low-0.75*aa
+    stop=max(0,min(entry_low-0.35*aa,base-0.20*aa))
+    risk=max(0.01,((entry_low+entry_high)/2)-stop)
+    target=max(p+1.8*aa,((entry_low+entry_high)/2)+2.1*risk)
+    rr=(target-((entry_low+entry_high)/2))/risk
+    return {"entry_low":round(entry_low,2),"entry_high":round(entry_high,2),"stop":round(stop,2),"target":round(target,2),"rr":round(rr,1)}
+
+
+def trade_recommendation(a: dict[str, Any]) -> str:
+    s=a["scores"]; p=a["tech"]["price"]; l=a["trade_levels"]
+    if s["trend"]<=3.0 and s["momentum"]<=3.5: return "SELL"
+    if s["trade"]>=7.2:
+        # A good setup is not a BUY if price has already run beyond the preferred zone.
+        if l["entry_low"]*0.995 <= p <= l["entry_high"]*1.01 and l["stop"] < l["entry_low"]: return "BUY"
+        return "WAIT"
+    if s["trade"]>=6.0 or s.get("recovery",0)>=6.5: return "WAIT"
     return "AVOID"
 
 
-def invest_recommendation(score: float) -> str:
-    if score >= 7.5: return "BUY"
-    if score >= 6.2: return "HOLD"
-    if score <= 4.0: return "SELL"
+def invest_recommendation(a: dict[str, Any]) -> str:
+    s=a["scores"]
+    if s.get("value_trap",0)>=3.0 and s["invest"]<6.0: return "SELL"
+    if s["invest"]>=7.2 and s["data_quality"]>=4.0: return "BUY"
+    if s["invest"]>=5.8: return "HOLD"
+    if s["invest"]<=3.8 and (s["growth"]<4.0 or s["quality"]<4.0): return "SELL"
     return "AVOID"
 
 
 def trade_reason(a: dict[str, Any]) -> str:
-    s = a["scores"]; rec = a["trade_rec"]
-    if rec == "BUY":
-        if s["relative_strength"] >= 7.2:
-            return "Strong trend and momentum, outperforming its market with a healthy entry setup."
-        if s["volume"] >= 7.0:
-            return "Strong trend and momentum are being confirmed by positive trading volume."
-        return "Trend and momentum are strong enough to justify a new trade at the current setup."
-    if rec == "WAIT":
-        if s["setup"] < 5.5:
-            return "The trend is constructive, but the price is not at an attractive entry right now."
-        return "Some signals are positive, but momentum is not strong enough to justify buying yet."
-    if rec == "SELL":
-        return "Trend and momentum have deteriorated materially, so downside risk dominates the setup."
-    return "Trend or relative strength is too weak to justify a new trade at this time."
+    s=a["scores"]; r=a["trade_rec"]; typ=a.get("opportunity_type","Balanced")
+    if r=="BUY":
+        if typ=="Recovery": return "Recovery is gaining confirmation: price momentum has improved after a major drawdown, with supportive volume/fundamentals."
+        if typ=="Breakout": return "Price is near a major high with strong momentum and volume confirmation, while the current entry remains acceptable."
+        if typ=="Pullback": return "The broader trend is strong and the pullback has brought price back into an attractive entry area."
+        return "Trend, momentum and relative strength are aligned, and the current price is inside the preferred entry zone."
+    if r=="WAIT":
+        if s.get("recovery",0)>=6.5: return "A recovery may be forming after a large decline, but confirmation is not strong enough for a direct buy yet."
+        if a["tech"]["price"]>a["trade_levels"]["entry_high"]: return "The setup is attractive, but price is above the preferred entry zone; wait for a better entry."
+        return "The setup has promise, but trend/momentum confirmation is not strong enough for a direct buy."
+    if r=="SELL": return "Price trend and momentum are both weak, so downside risk currently outweighs the opportunity."
+    return "The evidence is not strong enough for a new trade: trend, momentum or confirmation is missing."
 
 
 def invest_reason(a: dict[str, Any]) -> str:
-    s = a["scores"]; rec = a["invest_rec"]
-    if a["asset_type"] == "Metal":
-        if rec == "BUY": return "Long-term trend is strong and the dollar/yield backdrop is supportive for the metal."
-        if rec == "HOLD": return "The long-term trend remains acceptable, but the macro backdrop is not strong enough to add aggressively."
-        if rec == "SELL": return "The long-term trend and macro backdrop have both turned unfavorable."
-        return "The current trend and macro backdrop do not justify a new long-term position."
-    if rec == "BUY":
-        if s["quality"] >= 7 and s["growth"] >= 7:
-            return "Strong business quality and growth, with valuation still reasonable versus peers."
-        if s["value"] >= 7 and s["quality"] >= 6:
-            return "A solid business is trading at an attractive valuation compared with its peers."
-        return "The combination of fundamentals, valuation and momentum supports long-term accumulation."
-    if rec == "HOLD":
-        if s["value"] < 5:
-            return "The business is acceptable, but the current valuation does not justify adding aggressively."
-        return "Long-term fundamentals are reasonable, but the expected reward is not strong enough for a fresh buy."
-    if rec == "SELL":
-        return "Weak fundamentals and valuation leave an unattractive long-term risk/reward profile."
-    return "Fundamentals, growth or valuation are not strong enough to justify a new long-term position."
-
-
-def trade_levels(a: dict[str, Any]) -> dict[str, float | None]:
-    t = a["tech"]; p=t["price"]; atr_abs=t.get("atr_abs"); s20=t.get("sma20"); s50=t.get("sma50")
-    if not finite(atr_abs) or atr_abs <= 0:
-        return {"entry_low":round(p*0.99,2),"entry_high":round(p*1.005,2),"stop":round(p*0.96,2),"target":round(p*1.08,2),"rr":2.0}
-    # Entry favors current price / first pullback toward short-term trend.
-    anchor = s20 if finite(s20) and s20 < p and (p-s20) <= 1.8*atr_abs else p
-    entry_low = max(0, anchor - 0.25*atr_abs)
-    entry_high = min(p + 0.10*atr_abs, anchor + 0.35*atr_abs) if anchor <= p else p + 0.1*atr_abs
-    support_candidates = [x for x in [s20,s50,p-1.2*atr_abs] if finite(x) and x < p]
-    support = max(support_candidates) if support_candidates else p-1.2*atr_abs
-    stop = max(0, support - 0.65*atr_abs)
-    risk = max(0.01, p-stop)
-    target = p + max(2.0*risk, 2.1*atr_abs)
-    rr = (target-p)/risk if risk else None
-    return {"entry_low":round(entry_low,2),"entry_high":round(entry_high,2),"stop":round(stop,2),"target":round(target,2),"rr":round(rr,1) if finite(rr) else None}
-
+    s=a["scores"]; r=a["invest_rec"]
+    if a["asset_type"]=="Metal":
+        return "Long-term trend and macro conditions are supportive." if r=="BUY" else ("Trend is acceptable, but macro confirmation is mixed." if r=="HOLD" else "Trend and macro conditions do not support a new long-term position.")
+    if r=="BUY":
+        if s["growth_value"]>=7.2: return "Growth and business quality are strong while valuation remains reasonable versus peers, with price momentum confirming the thesis."
+        if s["quality_value"]>=7.2: return "Business quality is strong and valuation is attractive versus peers, with enough market confirmation to support accumulation."
+        if s["recovery"]>=7.0: return "The stock is recovering from a major drawdown while fundamentals and price behavior are improving enough to support long-term accumulation."
+        return "Quality, growth, valuation and market confirmation are collectively strong enough for long-term accumulation."
+    if r=="HOLD":
+        if s["value"]<4.5: return "The business may be sound, but valuation is not attractive enough for aggressive new buying."
+        return "The long-term case is reasonable, but the evidence is not strong enough for a fresh high-conviction buy."
+    if r=="SELL": return "Fundamental deterioration and weak market behavior create an unfavorable long-term risk/reward profile."
+    if s.get("value_trap",0)>=2.5: return "The stock looks cheaper after its decline, but earnings/price deterioration raises value-trap risk."
+    return "Fundamentals, valuation or forward confirmation are not strong enough for a new long-term position."
 
 def investment_target(a: dict[str, Any], all_assets: list[dict[str, Any]]) -> tuple[float | None, str | None]:
     if a["asset_type"] != "Equity":
@@ -553,11 +604,11 @@ function spark(v){if(!v||v.length<2)return'';let mn=Math.min(...v),mx=Math.max(.
 function score(a){return a.scores[MODE]};function rec(a){return MODE==='trade'?a.trade_rec:a.invest_rec};function reason(a){return MODE==='trade'?a.trade_reason:a.invest_reason}
 function money(a,n){return n==null?'—':`${a.currency} ${fmt(n)}`}
 function cardLevels(a){if(MODE==='trade'){let l=a.trade_levels;return `<div class="levels"><div class="lv"><span>Entry</span><b>${fmt(l.entry_low)}–${fmt(l.entry_high)}</b></div><div class="lv"><span>Target</span><b>${fmt(l.target)}</b></div><div class="lv"><span>Stop</span><b>${fmt(l.stop)}</b></div></div>`}let target=a.invest_target;let up=target?((target/a.price-1)*100):null;return `<div class="levels"><div class="lv"><span>12M Target</span><b>${money(a,target)}</b></div><div class="lv"><span>Upside</span><b>${up==null?'—':(up>0?'+':'')+fmt(up,1)+'%'}</b></div><div class="lv"><span>Horizon</span><b>12–36 mo</b></div></div>`}
-function render(){let q=$('q').value.toLowerCase(),rfilter=$('recFilter').value;let arr=DATA.filter(a=>(MARKET==='All'||a.market===MARKET||a.asset_type===MARKET)&&(!q||a.ticker.toLowerCase().includes(q)||a.name.toLowerCase().includes(q))&&(!rfilter||rec(a)===rfilter)).sort((a,b)=>score(b)-score(a));$('grid').innerHTML=arr.length?arr.map(a=>`<div class="card" onclick='openAsset(${JSON.stringify(a.ticker)})'><div class="row"><div><div class="ticker">${a.ticker.replace('.SR','')}</div><div class="name">${a.name}</div></div><span class="rec ${rc(rec(a))}">${rec(a)}</span></div><div class="row" style="margin-top:11px"><div class="price">${money(a,a.price)}</div><div class="score ${rc(rec(a))}">${score(a).toFixed(1)}</div></div><div class="spark ${rc(rec(a))}">${spark(a.spark)}</div><div class="reason">${reason(a)}</div>${cardLevels(a)}<div class="row" style="margin-top:11px"><span class="meta">${a.market} · ${a.sector}</span><span class="pill">Data ${a.as_of}</span></div></div>`).join(''):'<div class="empty">No opportunities match this view.</div>';updateHero(arr)}
+function render(){let q=$('q').value.toLowerCase(),rfilter=$('recFilter').value;let arr=DATA.filter(a=>(MARKET==='All'||a.market===MARKET||a.asset_type===MARKET)&&(!q||a.ticker.toLowerCase().includes(q)||a.name.toLowerCase().includes(q))&&(!rfilter||rec(a)===rfilter)).sort((a,b)=>score(b)-score(a));$('grid').innerHTML=arr.length?arr.map(a=>`<div class="card" onclick='openAsset(${JSON.stringify(a.ticker)})'><div class="row"><div><div class="ticker">${a.ticker.replace('.SR','')}</div><div class="name">${a.name}</div></div><span class="rec ${rc(rec(a))}">${rec(a)}</span></div><div class="row" style="margin-top:11px"><div class="price">${money(a,a.price)}</div><div class="score ${rc(rec(a))}">${score(a).toFixed(1)}</div></div><div class="spark ${rc(rec(a))}">${spark(a.spark)}</div><div class="reason">${reason(a)}</div>${cardLevels(a)}<div class="row" style="margin-top:11px"><span class="meta">${a.market} · ${a.sector} · ${a.opportunity_type||'Balanced'}</span><span class="pill">Data ${a.as_of}</span></div></div>`).join(''):'<div class="empty">No opportunities match this view.</div>';updateHero(arr)}
 function updateHero(arr){let buys=arr.filter(a=>rec(a)==='BUY').length;let top=arr[0];$('kMode').textContent=MODE==='trade'?'Trade opportunities':'Long-term opportunities';$('kBuys').textContent=buys;$('kTop').textContent=top?`${top.ticker.replace('.SR','')} · ${score(top).toFixed(1)}`:'—'}
 function setMode(m,el){MODE=m;document.querySelectorAll('.mode').forEach(x=>x.classList.remove('active'));el.classList.add('active');$('modeTitle').textContent=m==='trade'?'Best Trade Opportunities':'Best Long-Term Investments';$('recFilter').innerHTML=m==='trade'?'<option value="">All recommendations</option><option>BUY</option><option>WAIT</option><option>AVOID</option><option>SELL</option>':'<option value="">All recommendations</option><option>BUY</option><option>HOLD</option><option>AVOID</option><option>SELL</option>';render()}
 function setMarket(m,el){MARKET=m;document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));el.classList.add('active');render()}
-function openAsset(t){let a=DATA.find(x=>x.ticker===t);if(!a)return;let r=rec(a),s=score(a);$('dTitle').textContent=`${a.name} · ${a.ticker.replace('.SR','')}`;$('dSub').textContent=`${a.market} · ${a.sector} · data through ${a.as_of}`;$('dPrice').textContent=money(a,a.price);$('dRec').textContent=`${r} · ${s.toFixed(1)}/10`;$('dRec').className=`bigrec ${rc(r)}`;$('dReason').textContent=reason(a);let m=MODE==='trade'?[['Trend',a.scores.trend],['Momentum',a.scores.momentum],['Rel. Strength',a.scores.relative_strength],['Setup',a.scores.setup],['Volume',a.scores.volume],['Risk',a.scores.risk],['RSI',a.rsi],['6M Return',a.ret126==null?'—':fmt(a.ret126,1)+'%']]:[['Quality',a.scores.quality],['Growth',a.scores.growth],['Value',a.scores.value],['Momentum',a.scores.momentum],['Risk',a.scores.risk],['Data Quality',a.scores.data_quality],['P/E',a.forward_pe||a.pe],['6M Return',a.ret126==null?'—':fmt(a.ret126,1)+'%']];$('metrics').innerHTML=m.map(x=>`<div class="metric"><span>${x[0]}</span><b>${typeof x[1]==='number'?fmt(x[1],1):x[1]}</b></div>`).join('');if(MODE==='trade'){let l=a.trade_levels;$('dLevels').innerHTML=[['Preferred Entry',`${money(a,l.entry_low)} – ${money(a,l.entry_high)}`],['Target',money(a,l.target)],['Stop / Invalidation',money(a,l.stop)],['Risk / Reward',l.rr?`${fmt(l.rr,1)}×`:'—']].map(x=>`<div class="metric"><span>${x[0]}</span><b>${x[1]}</b></div>`).join('')}else{let up=a.invest_target?((a.invest_target/a.price-1)*100):null;$('dLevels').innerHTML=[['12M Target',money(a,a.invest_target)],['Expected Upside',up==null?'—':(up>0?'+':'')+fmt(up,1)+'%'],['Target Basis',a.invest_target_source||'—'],['Horizon','12–36 months']].map(x=>`<div class="metric"><span>${x[0]}</span><b>${x[1]}</b></div>`).join('')}$('ai').textContent=a.ai_context||'No additional AI context. The recommendation above is generated directly by the scoring engine.';$('news').innerHTML=(a.news||[]).map(n=>`<li><a target="_blank" rel="noopener" href="${n.link}">${n.title}</a> <span class="meta">${n.publisher}</span></li>`).join('')||'<li>No recent headlines returned.</li>';$('overlay').classList.add('open')}
+function openAsset(t){let a=DATA.find(x=>x.ticker===t);if(!a)return;let r=rec(a),s=score(a);$('dTitle').textContent=`${a.name} · ${a.ticker.replace('.SR','')}`;$('dSub').textContent=`${a.market} · ${a.sector} · data through ${a.as_of}`;$('dPrice').textContent=money(a,a.price);$('dRec').textContent=`${r} · ${s.toFixed(1)}/10`;$('dRec').className=`bigrec ${rc(r)}`;$('dReason').textContent=reason(a);let m=MODE==='trade'?[['Trend',a.scores.trend],['Momentum',a.scores.momentum],['Rel. Strength',a.scores.relative_strength],['Setup',a.scores.setup],['Volume',a.scores.volume],['Risk',a.scores.risk],['Recovery',a.scores.recovery],['RSI',a.rsi],['6M Return',a.ret126==null?'—':fmt(a.ret126,1)+'%']]:[['Quality',a.scores.quality],['Growth',a.scores.growth],['Value',a.scores.value],['Momentum',a.scores.momentum],['Risk',a.scores.risk],['Recovery',a.scores.recovery],['Data Quality',a.scores.data_quality],['P/E',a.forward_pe||a.pe],['6M Return',a.ret126==null?'—':fmt(a.ret126,1)+'%']];$('metrics').innerHTML=m.map(x=>`<div class="metric"><span>${x[0]}</span><b>${typeof x[1]==='number'?fmt(x[1],1):x[1]}</b></div>`).join('');if(MODE==='trade'){let l=a.trade_levels;$('dLevels').innerHTML=[['Preferred Entry',`${money(a,l.entry_low)} – ${money(a,l.entry_high)}`],['Target',money(a,l.target)],['Stop / Invalidation',money(a,l.stop)],['Risk / Reward',l.rr?`${fmt(l.rr,1)}×`:'—']].map(x=>`<div class="metric"><span>${x[0]}</span><b>${x[1]}</b></div>`).join('')}else{let up=a.invest_target?((a.invest_target/a.price-1)*100):null;$('dLevels').innerHTML=[['12M Target',money(a,a.invest_target)],['Expected Upside',up==null?'—':(up>0?'+':'')+fmt(up,1)+'%'],['Target Basis',a.invest_target_source||'—'],['Horizon','12–36 months']].map(x=>`<div class="metric"><span>${x[0]}</span><b>${x[1]}</b></div>`).join('')}$('ai').textContent=a.ai_context||'No additional AI context. The recommendation above is generated directly by the scoring engine.';$('news').innerHTML=(a.news||[]).map(n=>`<li><a target="_blank" rel="noopener" href="${n.link}">${n.title}</a> <span class="meta">${n.publisher}</span></li>`).join('')||'<li>No recent headlines returned.</li>';$('overlay').classList.add('open')}
 function closeDrawer(){$('overlay').classList.remove('open')};$('q').addEventListener('input',render);$('recFilter').addEventListener('change',render);render();
 '''
 
@@ -566,7 +617,7 @@ def render_html(assets: list[dict[str, Any]], generated: str) -> str:
     data_json=json.dumps(assets,ensure_ascii=False).replace("</","<\\/")
     js=JS.replace("__DATA__",data_json)
     sa=sum(a["market"]=="Saudi" for a in assets); us=sum(a["market"]=="US" for a in assets)
-    return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Market Opportunity Dashboard</title><style>{CSS}</style></head><body><div class="wrap"><div class="top"><div class="brand"><h1>Market Opportunity Dashboard</h1><p>Clear recommendations across Saudi stocks · US stocks · Gold · Silver</p></div><div class="updated">Updated {html.escape(generated)} Riyadh time<br>Deterministic scoring · AI only adds optional context</div></div><div class="modebar"><button class="mode active" onclick="setMode('trade',this)">TRADE</button><button class="mode" onclick="setMode('invest',this)">INVEST</button></div><div class="summary"><div class="kpi"><div class="l" id="kMode">Trade opportunities</div><div class="v">{len(assets)} scanned</div></div><div class="kpi"><div class="l">Saudi / US</div><div class="v">{sa} / {us}</div></div><div class="kpi"><div class="l">Current BUY signals</div><div class="v" id="kBuys">—</div></div><div class="kpi"><div class="l">Top current idea</div><div class="v" id="kTop">—</div></div></div><div class="toolbar"><div class="tabs"><button class="tab active" onclick="setMarket('All',this)">All</button><button class="tab" onclick="setMarket('Saudi',this)">Saudi</button><button class="tab" onclick="setMarket('US',this)">US</button><button class="tab" onclick="setMarket('Metal',this)">Gold & Silver</button></div><span class="grow"></span><input id="q" class="search" placeholder="Search ticker or company"><select id="recFilter"><option value="">All recommendations</option><option>BUY</option><option>WAIT</option><option>AVOID</option><option>SELL</option></select></div><div class="section-title" id="modeTitle">Best Trade Opportunities</div><div id="grid" class="grid"></div><div class="foot"><b>How to read this:</b> TRADE is designed for days-to-weeks and emphasizes trend, established momentum, relative strength and entry quality. INVEST is designed for 12–36 months and emphasizes profitability/quality, growth, peer-relative valuation, momentum confirmation and risk. Gold and silver use a separate trend/macro model including the US dollar and Treasury-yield direction. Recommendations are research signals, not guarantees. yfinance is the free data provider; verify live price before placing an order, especially for Tadawul.</div></div><div id="overlay" class="overlay" onclick="if(event.target===this)closeDrawer()"><div class="drawer"><div class="row"><div class="dtitle"><h2 id="dTitle"></h2><div id="dSub" class="meta"></div></div><button class="close" onclick="closeDrawer()">×</button></div><div id="dPrice" class="price"></div><div id="dRec"></div><div id="dReason" class="dreasons"></div><div id="dLevels" class="dlevels"></div><div id="metrics" class="metricgrid"></div><div id="ai" class="ai"></div><h3>Recent headlines</h3><ul id="news" class="news"></ul><div class="method"><b>Methodology:</b> recommendations are generated from transparent factor scores rather than an LLM. Equity investment scoring follows established factor families—quality/profitability, growth, value and momentum—while trade scoring uses medium-term momentum, trend and relative strength. Target prices use analyst consensus when available, otherwise a conservative peer forward-P/E estimate when enough data exists.</div></div></div><script>{js}</script></body></html>'''
+    return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Market Opportunity Dashboard</title><style>{CSS}</style></head><body><div class="wrap"><div class="top"><div class="brand"><h1>Market Opportunity Dashboard</h1><p>Clear recommendations across Saudi stocks · US stocks · Gold · Silver</p></div><div class="updated">Updated {html.escape(generated)} Riyadh time<br>Deterministic scoring · AI only adds optional context</div></div><div class="modebar"><button class="mode active" onclick="setMode('trade',this)">TRADE</button><button class="mode" onclick="setMode('invest',this)">INVEST</button></div><div class="summary"><div class="kpi"><div class="l" id="kMode">Trade opportunities</div><div class="v">{len(assets)} scanned</div></div><div class="kpi"><div class="l">Saudi / US</div><div class="v">{sa} / {us}</div></div><div class="kpi"><div class="l">Current BUY signals</div><div class="v" id="kBuys">—</div></div><div class="kpi"><div class="l">Top current idea</div><div class="v" id="kTop">—</div></div></div><div class="toolbar"><div class="tabs"><button class="tab active" onclick="setMarket('All',this)">All</button><button class="tab" onclick="setMarket('Saudi',this)">Saudi</button><button class="tab" onclick="setMarket('US',this)">US</button><button class="tab" onclick="setMarket('Metal',this)">Gold & Silver</button></div><span class="grow"></span><input id="q" class="search" placeholder="Search ticker or company"><select id="recFilter"><option value="">All recommendations</option><option>BUY</option><option>WAIT</option><option>AVOID</option><option>SELL</option></select></div><div class="section-title" id="modeTitle">Best Trade Opportunities</div><div id="grid" class="grid"></div><div class="foot"><b>How to read this:</b> V3 scans several opportunity paths at once—momentum, breakout, pullback, recovery, quality/value and growth/value—then cross-checks them with historical price behavior and deterioration risk. TRADE only says BUY when the current price is actually inside the preferred entry zone. INVEST combines profitability/quality, growth, peer-relative valuation, momentum and recovery confirmation. Gold and silver use a separate trend/macro model including the US dollar and Treasury-yield direction. Recommendations are research signals, not guarantees. yfinance is the free data provider; verify live price before placing an order, especially for Tadawul.</div></div><div id="overlay" class="overlay" onclick="if(event.target===this)closeDrawer()"><div class="drawer"><div class="row"><div class="dtitle"><h2 id="dTitle"></h2><div id="dSub" class="meta"></div></div><button class="close" onclick="closeDrawer()">×</button></div><div id="dPrice" class="price"></div><div id="dRec"></div><div id="dReason" class="dreasons"></div><div id="dLevels" class="dlevels"></div><div id="metrics" class="metricgrid"></div><div id="ai" class="ai"></div><h3>Recent headlines</h3><ul id="news" class="news"></ul><div class="method"><b>Methodology:</b> V3 is a transparent multi-model engine, not an LLM stock picker. It uses established factor families (quality, value, growth, momentum/revisions where available), TradingView-style technical confluence concepts, multi-year historical context, peer-relative normalization, recovery detection and explicit value-trap checks. Target prices use analyst consensus when available, otherwise a conservative peer forward-P/E estimate when enough data exists.</div></div></div><script>{js}</script></body></html>'''
 
 
 def main() -> None:
@@ -591,9 +642,10 @@ def main() -> None:
 
     for a in assets:
         a["scores"] = calc_equity_scores(assets,a,bench.get(a["market"])) if a["asset_type"]=="Equity" else calc_metal_scores(a,macro)
-        a["trade_rec"] = trade_recommendation(a["scores"]["trade"])
-        a["invest_rec"] = invest_recommendation(a["scores"]["invest"])
         a["trade_levels"] = trade_levels(a)
+        a["trade_rec"] = trade_recommendation(a)
+        a["invest_rec"] = invest_recommendation(a)
+        a["opportunity_type"] = opportunity_type(a)
         target,source = investment_target(a,assets)
         a["invest_target"],a["invest_target_source"] = target,source
         # Flatten only useful fields into final JSON.
@@ -602,6 +654,9 @@ def main() -> None:
             "price":round(t["price"],2),"rsi":round(t["rsi"],1) if finite(t.get("rsi")) else None,
             "ret21":round(t["ret21"],2) if finite(t.get("ret21")) else None,
             "ret126":round(t["ret126"],2) if finite(t.get("ret126")) else None,
+            "ret252":round(t["ret252"],2) if finite(t.get("ret252")) else None,
+            "position52":round(t["position52"],1) if finite(t.get("position52")) else None,
+            "drawdown":round(t["drawdown"],1) if finite(t.get("drawdown")) else None,
             "atr_pct":round(t["atr_pct"],2) if finite(t.get("atr_pct")) else None,
             "spark":t["spark"],"as_of":t["as_of"],"sector":f.get("sector") if f else "Precious Metals",
             "pe":round(f["trailing_pe"],2) if f and finite(f.get("trailing_pe")) and f["trailing_pe"]>0 else None,
