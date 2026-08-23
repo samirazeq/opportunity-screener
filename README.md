@@ -1,35 +1,49 @@
-# Market Opportunity Dashboard
+# Market Opportunity Dashboard v2.0
 
-A deployable research dashboard covering Saudi stocks, US stocks, gold, and silver.
+A clear research dashboard for **Saudi stocks, US stocks, gold and silver**.
 
-## What it does
-- Fetches 1 year of market history through `yfinance`.
-- Calculates Wilder RSI, 20/50/200-day averages, ATR, volume ratio, momentum and 52-week structure.
-- Produces separate **Short-Term**, **Swing**, and **Investment** scores from 0–10.
-- Generates a ranked cross-market opportunity view.
-- Shows mechanical ATR-based research entry/invalidation/objective levels.
-- Pulls recent headlines for the top candidates.
-- Optionally asks Claude to explain the top candidates, while keeping the scoring rule-based.
-- Outputs a static webpage to `docs/index.html` that works well with GitHub Pages.
+## What changed in V2
+
+- Two simple modes: **TRADE** and **INVEST**.
+- Direct recommendations: **BUY / WAIT / HOLD / AVOID / SELL**.
+- Every recommendation includes **one short reason**.
+- Trade view shows **preferred entry, target, stop and risk/reward**.
+- Investment view shows a **12-month target when defensible** and a 12–36 month horizon.
+- Equity scoring uses established factor families instead of an arbitrary single score:
+  - Trade: trend, medium-term momentum, relative strength, volume confirmation, setup quality and risk.
+  - Invest: quality/profitability, growth, peer-relative valuation, momentum and risk.
+- Gold and silver use a separate trend/macro model including the **US dollar and US Treasury-yield direction**; silver also includes copper as an industrial-demand proxy.
+- AI is optional and **cannot change the recommendation**. It only adds one short news/catalyst sentence.
+- GitHub Pages deployment now uses **GitHub Actions directly**. The workflow does not commit generated market-data files back to your repository, eliminating the merge conflicts from V1.
+
+## Data
+
+The project uses `yfinance` as a free prototype provider. It is generally useful for US securities and futures, but Saudi/Tadawul coverage can be incomplete or delayed. Always verify the live execution price with your broker before placing an order.
 
 ## Run locally
+
 ```bash
 pip install -r requirements.txt
 python dashboard.py
 ```
-Then open `docs/index.html`.
 
-## Optional Claude analysis
-Add an environment variable named `ANTHROPIC_API_KEY` before running. On GitHub, add it under **Settings → Secrets and variables → Actions → New repository secret**.
+Open `docs/index.html`.
 
-## Put it online with GitHub Pages
-1. Upload this project to a GitHub repository.
-2. In **Settings → Pages**, choose **Deploy from a branch**.
-3. Select your main branch and `/docs` folder. This project is already configured to generate the live dashboard into `docs/`.
-4. Enable Actions. The included workflow refreshes the data hourly between 05:00 and 22:00 UTC and can also be run manually.
+## GitHub Pages setup
 
-## Important prototype limitation
-`yfinance` is convenient for US equities and metals but Saudi/Tadawul coverage can be incomplete or delayed. The code intentionally keeps data retrieval separate from scoring so a licensed Saudi-market data provider can replace it later without rebuilding the dashboard.
+After pushing V2 to GitHub:
 
-## Scoring philosophy
-The score engine—not Claude—determines ranking. Claude only receives the highest-ranked assets and explains catalysts, context, and risks. This preserves repeatability and avoids AI-picked securities without quantitative support.
+1. Open **Settings → Pages**.
+2. Under **Build and deployment → Source**, choose **GitHub Actions**.
+3. Open **Actions → Build and deploy market dashboard → Run workflow** once.
+4. The same Pages URL will serve the new dashboard.
+
+## Optional AI context
+
+Add `ANTHROPIC_API_KEY` under **Settings → Secrets and variables → Actions**. The core recommendations work without it.
+
+## Research basis
+
+The model intentionally uses widely established factor concepts rather than inventing a new investment theory. Quality is represented by profitability, growth, safety/balance-sheet and cash-generation measures; value is measured relative to peers; medium-term momentum and relative strength drive the trade model. Metals use their own macro/trend model because equity fundamentals do not apply to them.
+
+No model can guarantee investment outcomes. The dashboard is designed to make the decision process transparent, consistent and easy to audit.
