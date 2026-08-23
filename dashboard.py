@@ -395,11 +395,11 @@ def main() -> None:
         a.setdefault("news", [])
 
     riyadh = dt.datetime.now(dt.timezone(dt.timedelta(hours=3))).strftime("%Y-%m-%d %H:%M")
-    out = Path("public")
+    out = Path("docs")
     out.mkdir(parents=True, exist_ok=True)
     (out / "index.html").write_text(render_html(assets, riyadh), encoding="utf-8")
     (out / "data.json").write_text(json.dumps({"generated": riyadh, "assets": assets}, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"Generated {len(assets)} assets -> public/index.html")
+    print(f"Generated {len(assets)} assets -> docs/index.html")
 
 if __name__ == "__main__":
     main()
