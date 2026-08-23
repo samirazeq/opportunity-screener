@@ -488,6 +488,23 @@ def trade_recommendation(a: dict[str, Any]) -> str:
     return "AVOID"
 
 
+def enforce_trade_safety(a: dict[str, Any]) -> str:
+    """Final fail-safe: a live BUY is impossible unless price is in-zone and stop is below entry."""
+    rec = trade_recommendation(a)
+    if rec != "BUY":
+        return rec
+    p = a["tech"]["price"]
+    l = a["trade_levels"]
+    valid = (
+        finite(p) and finite(l.get("entry_low")) and finite(l.get("entry_high")) and finite(l.get("stop"))
+        and l["entry_low"] <= p <= l["entry_high"]
+        and l["stop"] < l["entry_low"]
+        and l["target"] > p
+        and l["rr"] >= 1.5
+    )
+    return "BUY" if valid else "WAIT"
+
+
 def invest_recommendation(a: dict[str, Any]) -> str:
     s=a["scores"]
     if s.get("value_trap",0)>=3.0 and s["invest"]<6.0: return "SELL"
@@ -499,17 +516,29 @@ def invest_recommendation(a: dict[str, Any]) -> str:
 
 def trade_reason(a: dict[str, Any]) -> str:
     s=a["scores"]; r=a["trade_rec"]; typ=a.get("opportunity_type","Balanced")
+    p=a["tech"]["price"]; l=a["trade_levels"]
     if r=="BUY":
-        if typ=="Recovery": return "Recovery is gaining confirmation: price momentum has improved after a major drawdown, with supportive volume/fundamentals."
-        if typ=="Breakout": return "Price is near a major high with strong momentum and volume confirmation, while the current entry remains acceptable."
-        if typ=="Pullback": return "The broader trend is strong and the pullback has brought price back into an attractive entry area."
-        return "Trend, momentum and relative strength are aligned, and the current price is inside the preferred entry zone."
+        strengths=[]
+        if s.get("momentum",0)>=7.0: strengths.append("strong momentum")
+        if s.get("relative_strength",0)>=6.5: strengths.append("market outperformance")
+        if s.get("volume",0)>=6.5: strengths.append("supportive volume")
+        if s.get("recovery",0)>=6.5: strengths.append("an improving recovery")
+        if s.get("breakout",0)>=7.0: strengths.append("breakout strength")
+        if not strengths: strengths.append("an aligned trend and setup")
+        detail=", ".join(strengths[:2])
+        return f"BUY because {detail}; the current price is inside the preferred entry zone with defined downside."
     if r=="WAIT":
-        if s.get("recovery",0)>=6.5: return "A recovery may be forming after a large decline, but confirmation is not strong enough for a direct buy yet."
-        if a["tech"]["price"]>a["trade_levels"]["entry_high"]: return "The setup is attractive, but price is above the preferred entry zone; wait for a better entry."
-        return "The setup has promise, but trend/momentum confirmation is not strong enough for a direct buy."
-    if r=="SELL": return "Price trend and momentum are both weak, so downside risk currently outweighs the opportunity."
-    return "The evidence is not strong enough for a new trade: trend, momentum or confirmation is missing."
+        if p > l["entry_high"]:
+            return "WAIT because the setup is attractive but the current price is above the preferred entry zone."
+        if p < l["entry_low"]:
+            return "WAIT because price has not yet reached the preferred entry zone."
+        if l["stop"] >= l["entry_low"] or l["target"] <= p or l["rr"] < 1.5:
+            return "WAIT because the price setup does not yet provide a valid stop and risk/reward structure."
+        if s.get("recovery",0)>=6.5:
+            return "WAIT because a recovery is forming, but confirmation is not yet strong enough."
+        return "WAIT because the opportunity is promising, but trend or momentum confirmation is still incomplete."
+    if r=="SELL": return "SELL because both trend and momentum are weak and downside risk dominates."
+    return "AVOID because the evidence is not strong enough to justify a new trade."
 
 
 def invest_reason(a: dict[str, Any]) -> str:
@@ -601,7 +630,23 @@ const DATA=__DATA__;let MODE='trade',MARKET='All';
 const $=id=>document.getElementById(id);const fmt=(n,d=2)=>n==null?'—':Number(n).toFixed(d);
 function rc(r){r=r.toLowerCase();return r==='buy'?'buy':r==='hold'?'hold':r==='wait'?'wait':r==='sell'?'sell':'avoid'}
 function spark(v){if(!v||v.length<2)return'';let mn=Math.min(...v),mx=Math.max(...v),w=240,h=44;let p=v.map((x,i)=>`${i/(v.length-1)*w},${h-(x-mn)/(mx-mn||1)*h}`).join(' ');return `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none"><polyline fill="none" stroke="currentColor" stroke-width="2" points="${p}"/></svg>`}
-function score(a){return a.scores[MODE]};function rec(a){return MODE==='trade'?a.trade_rec:a.invest_rec};function reason(a){return MODE==='trade'?a.trade_reason:a.invest_reason}
+function score(a){return a.scores[MODE]};
+function safeTradeRec(a){
+  let r=a.trade_rec,l=a.trade_levels,p=a.price;
+  if(r==='BUY' && !(l && p>=l.entry_low && p<=l.entry_high && l.stop<l.entry_low && l.target>p && l.rr>=1.5)) return 'WAIT';
+  return r;
+}
+function rec(a){return MODE==='trade'?safeTradeRec(a):a.invest_rec};
+function reason(a){
+  if(MODE!=='trade') return a.invest_reason;
+  let r=safeTradeRec(a),l=a.trade_levels,p=a.price;
+  if(r==='WAIT' && a.trade_rec==='BUY'){
+    if(p>l.entry_high) return 'WAIT because the setup is attractive but the current price is above the preferred entry zone.';
+    if(p<l.entry_low) return 'WAIT because price has not yet reached the preferred entry zone.';
+    return 'WAIT because the current entry, stop and risk/reward structure is not valid enough for a BUY.';
+  }
+  return a.trade_reason;
+}
 function money(a,n){return n==null?'—':`${a.currency} ${fmt(n)}`}
 function cardLevels(a){if(MODE==='trade'){let l=a.trade_levels;return `<div class="levels"><div class="lv"><span>Entry</span><b>${fmt(l.entry_low)}–${fmt(l.entry_high)}</b></div><div class="lv"><span>Target</span><b>${fmt(l.target)}</b></div><div class="lv"><span>Stop</span><b>${fmt(l.stop)}</b></div></div>`}let target=a.invest_target;let up=target?((target/a.price-1)*100):null;return `<div class="levels"><div class="lv"><span>12M Target</span><b>${money(a,target)}</b></div><div class="lv"><span>Upside</span><b>${up==null?'—':(up>0?'+':'')+fmt(up,1)+'%'}</b></div><div class="lv"><span>Horizon</span><b>12–36 mo</b></div></div>`}
 function render(){let q=$('q').value.toLowerCase(),rfilter=$('recFilter').value;let arr=DATA.filter(a=>(MARKET==='All'||a.market===MARKET||a.asset_type===MARKET)&&(!q||a.ticker.toLowerCase().includes(q)||a.name.toLowerCase().includes(q))&&(!rfilter||rec(a)===rfilter)).sort((a,b)=>score(b)-score(a));$('grid').innerHTML=arr.length?arr.map(a=>`<div class="card" onclick='openAsset(${JSON.stringify(a.ticker)})'><div class="row"><div><div class="ticker">${a.ticker.replace('.SR','')}</div><div class="name">${a.name}</div></div><span class="rec ${rc(rec(a))}">${rec(a)}</span></div><div class="row" style="margin-top:11px"><div class="price">${money(a,a.price)}</div><div class="score ${rc(rec(a))}">${score(a).toFixed(1)}</div></div><div class="spark ${rc(rec(a))}">${spark(a.spark)}</div><div class="reason">${reason(a)}</div>${cardLevels(a)}<div class="row" style="margin-top:11px"><span class="meta">${a.market} · ${a.sector} · ${a.opportunity_type||'Balanced'}</span><span class="pill">Data ${a.as_of}</span></div></div>`).join(''):'<div class="empty">No opportunities match this view.</div>';updateHero(arr)}
@@ -617,7 +662,7 @@ def render_html(assets: list[dict[str, Any]], generated: str) -> str:
     data_json=json.dumps(assets,ensure_ascii=False).replace("</","<\\/")
     js=JS.replace("__DATA__",data_json)
     sa=sum(a["market"]=="Saudi" for a in assets); us=sum(a["market"]=="US" for a in assets)
-    return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Market Opportunity Dashboard</title><style>{CSS}</style></head><body><div class="wrap"><div class="top"><div class="brand"><h1>Market Opportunity Dashboard</h1><p>Clear recommendations across Saudi stocks · US stocks · Gold · Silver</p></div><div class="updated">Updated {html.escape(generated)} Riyadh time<br>Deterministic scoring · AI only adds optional context</div></div><div class="modebar"><button class="mode active" onclick="setMode('trade',this)">TRADE</button><button class="mode" onclick="setMode('invest',this)">INVEST</button></div><div class="summary"><div class="kpi"><div class="l" id="kMode">Trade opportunities</div><div class="v">{len(assets)} scanned</div></div><div class="kpi"><div class="l">Saudi / US</div><div class="v">{sa} / {us}</div></div><div class="kpi"><div class="l">Current BUY signals</div><div class="v" id="kBuys">—</div></div><div class="kpi"><div class="l">Top current idea</div><div class="v" id="kTop">—</div></div></div><div class="toolbar"><div class="tabs"><button class="tab active" onclick="setMarket('All',this)">All</button><button class="tab" onclick="setMarket('Saudi',this)">Saudi</button><button class="tab" onclick="setMarket('US',this)">US</button><button class="tab" onclick="setMarket('Metal',this)">Gold & Silver</button></div><span class="grow"></span><input id="q" class="search" placeholder="Search ticker or company"><select id="recFilter"><option value="">All recommendations</option><option>BUY</option><option>WAIT</option><option>AVOID</option><option>SELL</option></select></div><div class="section-title" id="modeTitle">Best Trade Opportunities</div><div id="grid" class="grid"></div><div class="foot"><b>How to read this:</b> V3 scans several opportunity paths at once—momentum, breakout, pullback, recovery, quality/value and growth/value—then cross-checks them with historical price behavior and deterioration risk. TRADE only says BUY when the current price is actually inside the preferred entry zone. INVEST combines profitability/quality, growth, peer-relative valuation, momentum and recovery confirmation. Gold and silver use a separate trend/macro model including the US dollar and Treasury-yield direction. Recommendations are research signals, not guarantees. yfinance is the free data provider; verify live price before placing an order, especially for Tadawul.</div></div><div id="overlay" class="overlay" onclick="if(event.target===this)closeDrawer()"><div class="drawer"><div class="row"><div class="dtitle"><h2 id="dTitle"></h2><div id="dSub" class="meta"></div></div><button class="close" onclick="closeDrawer()">×</button></div><div id="dPrice" class="price"></div><div id="dRec"></div><div id="dReason" class="dreasons"></div><div id="dLevels" class="dlevels"></div><div id="metrics" class="metricgrid"></div><div id="ai" class="ai"></div><h3>Recent headlines</h3><ul id="news" class="news"></ul><div class="method"><b>Methodology:</b> V3 is a transparent multi-model engine, not an LLM stock picker. It uses established factor families (quality, value, growth, momentum/revisions where available), TradingView-style technical confluence concepts, multi-year historical context, peer-relative normalization, recovery detection and explicit value-trap checks. Target prices use analyst consensus when available, otherwise a conservative peer forward-P/E estimate when enough data exists.</div></div></div><script>{js}</script></body></html>'''
+    return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Market Opportunity Dashboard</title><style>{CSS}</style></head><body><div class="wrap"><div class="top"><div class="brand"><h1>Market Opportunity Dashboard</h1><p>Clear recommendations across Saudi stocks · US stocks · Gold · Silver</p></div><div class="updated">Updated {html.escape(generated)} Riyadh time<br>Deterministic scoring · AI only adds optional context</div></div><div class="modebar"><button class="mode active" onclick="setMode('trade',this)">TRADE</button><button class="mode" onclick="setMode('invest',this)">INVEST</button></div><div class="summary"><div class="kpi"><div class="l" id="kMode">Trade opportunities</div><div class="v">{len(assets)} scanned</div></div><div class="kpi"><div class="l">Saudi / US</div><div class="v">{sa} / {us}</div></div><div class="kpi"><div class="l">Current BUY signals</div><div class="v" id="kBuys">—</div></div><div class="kpi"><div class="l">Top current idea</div><div class="v" id="kTop">—</div></div></div><div class="toolbar"><div class="tabs"><button class="tab active" onclick="setMarket('All',this)">All</button><button class="tab" onclick="setMarket('Saudi',this)">Saudi</button><button class="tab" onclick="setMarket('US',this)">US</button><button class="tab" onclick="setMarket('Metal',this)">Gold & Silver</button></div><span class="grow"></span><input id="q" class="search" placeholder="Search ticker or company"><select id="recFilter"><option value="">All recommendations</option><option>BUY</option><option>WAIT</option><option>AVOID</option><option>SELL</option></select></div><div class="section-title" id="modeTitle">Best Trade Opportunities</div><div id="grid" class="grid"></div><div class="foot"><b>How to read this:</b> V3.1 scans several opportunity paths at once—momentum, breakout, pullback, recovery, quality/value and growth/value—then cross-checks them with historical price behavior and deterioration risk. TRADE only says BUY when the current price is actually inside the preferred entry zone. INVEST combines profitability/quality, growth, peer-relative valuation, momentum and recovery confirmation. Gold and silver use a separate trend/macro model including the US dollar and Treasury-yield direction. Recommendations are research signals, not guarantees. yfinance is the free data provider; verify live price before placing an order, especially for Tadawul.</div></div><div id="overlay" class="overlay" onclick="if(event.target===this)closeDrawer()"><div class="drawer"><div class="row"><div class="dtitle"><h2 id="dTitle"></h2><div id="dSub" class="meta"></div></div><button class="close" onclick="closeDrawer()">×</button></div><div id="dPrice" class="price"></div><div id="dRec"></div><div id="dReason" class="dreasons"></div><div id="dLevels" class="dlevels"></div><div id="metrics" class="metricgrid"></div><div id="ai" class="ai"></div><h3>Recent headlines</h3><ul id="news" class="news"></ul><div class="method"><b>Methodology:</b> V3.1 is a transparent multi-model engine, not an LLM stock picker. It uses established factor families (quality, value, growth, momentum/revisions where available), TradingView-style technical confluence concepts, multi-year historical context, peer-relative normalization, recovery detection and explicit value-trap checks. Target prices use analyst consensus when available, otherwise a conservative peer forward-P/E estimate when enough data exists.</div></div></div><script>{js}</script></body></html>'''
 
 
 def main() -> None:
@@ -643,7 +688,7 @@ def main() -> None:
     for a in assets:
         a["scores"] = calc_equity_scores(assets,a,bench.get(a["market"])) if a["asset_type"]=="Equity" else calc_metal_scores(a,macro)
         a["trade_levels"] = trade_levels(a)
-        a["trade_rec"] = trade_recommendation(a)
+        a["trade_rec"] = enforce_trade_safety(a)
         a["invest_rec"] = invest_recommendation(a)
         a["opportunity_type"] = opportunity_type(a)
         target,source = investment_target(a,assets)

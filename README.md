@@ -1,4 +1,4 @@
-# Market Opportunity Dashboard V3.0
+# Market Opportunity Dashboard V3.1.0
 
 A deployable research dashboard for Saudi stocks, US stocks, gold and silver.
 
@@ -26,3 +26,7 @@ Add `ANTHROPIC_API_KEY` as a GitHub Actions repository secret. AI only summarize
 
 ## Important
 This is a research tool, not a guarantee of returns. The free data layer is `yfinance`; Tadawul fundamental/analyst coverage can be incomplete. See `METHODOLOGY.md` for the model and source references.
+
+
+## V3.1 safety fix
+A TRADE BUY is now blocked unless the live price is inside the displayed entry zone, the stop is below the zone, the target is above price, and risk/reward is at least 1.5x. The browser independently re-checks the same rule before displaying BUY.
